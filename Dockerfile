@@ -1,15 +1,17 @@
-# 前端应用Dockerfile
-# 构建阶段
-FROM node:16-alpine AS builder
+# 前端应用Dockerfile - Zeabur优化版本
+FROM node:18-alpine AS builder
 
 # 设置工作目录
 WORKDIR /app
+
+# 设置npm镜像源以加速下载
+RUN npm config set registry https://registry.npmmirror.com/
 
 # 复制package.json和package-lock.json
 COPY package*.json ./
 
 # 安装依赖
-RUN npm install
+RUN npm ci --only=production
 
 # 复制源代码
 COPY . .
@@ -17,17 +19,51 @@ COPY . .
 # 构建应用
 RUN npm run build
 
-# 生产阶段
-FROM nginx:alpine
+# 生产阶段 - 使用轻量级nginx
+FROM nginx:1.25-alpine
 
-# 复制构建产物到nginx
+# 安装curl用于健康检查
+RUN apk add --no-cache curl
+
+# 复制构建产物
 COPY --from=builder /app/build /usr/share/nginx/html
 
-# 复制nginx配置文件
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# 创建简单的nginx配置
+COPY nginx.zeabur.conf /etc/nginx/conf.d/default.conf
+
+# 创建非root用户
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S frontend -u 1001 -G nodejs
+
+# 设置权限
+RUN chown -R frontend:nodejs /usr/share/nginx/html && \
+    chown -R frontend:nodejs /var/cache/nginx && \
+    chown -R frontend:nodejs /var/log/nginx && \
+    chown -R frontend:nodejs /etc/nginx/conf.d && \
+    chown -R frontend:nodejs /run/nginx
+
+# 创建启动脚本
+RUN echo '#!/bin/sh\n\
+# 动态生成nginx配置，支持环境变量 BACKEND_URL\n\
+if [ -n "$BACKEND_URL" ]; then\n\
+    # 使用环境变量更新nginx配置\n\
+    sed -i "s|\${BACKEND_URL:-http://localhost:8080}|$BACKEND_URL|g" /etc/nginx/conf.d/default.conf\n\
+fi\n\
+\n\
+# 启动nginx\n\
+exec nginx -g "daemon off;"\n\
+' > /entrypoint.sh && \
+    chmod +x /entrypoint.sh
+
+# 切换到非root用户
+USER frontend
 
 # 暴露端口
-EXPOSE 80
+EXPOSE 8080
 
-# 启动nginx
-CMD ["nginx", "-g", "daemon off;"]
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8080/ || exit 1
+
+# 使用启动脚本
+ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]
